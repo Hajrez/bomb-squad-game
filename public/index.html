@@ -1,0 +1,54 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Bomb Squad Web</title>
+    <link rel="stylesheet" href="/style.css" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <aside class="sidebar">
+        <h1>Bomb Squad</h1>
+        <form id="join-form" class="join-form">
+          <label>
+            Name
+            <input id="player-name" type="text" maxlength="14" value="Player" />
+          </label>
+
+          <label>
+            Room
+            <input id="room-code" type="text" maxlength="8" value="BOMB" />
+          </label>
+
+          <label>
+            Players
+            <select id="player-count">
+              <option value="2">2</option>
+              <option value="3">3</option>
+              <option value="4">4</option>
+            </select>
+          </label>
+
+          <button type="submit">Play</button>
+        </form>
+
+        <div class="legend">
+          <h3>Controls</h3>
+          <ul>
+            <li>Move: WASD / Arrow keys</li>
+            <li>Drop bomb: Space</li>
+            <li>Bot test match: room fills with AI</li>
+          </ul>
+        </div>
+      </aside>
+
+      <main class="game-panel">
+        <canvas id="game-canvas" width="840" height="560"></canvas>
+      </main>
+    </div>
+
+    <script src="/socket.io/socket.io.js"></script>
+    <script src="/game.js"></script>
+  </body>
+</html>

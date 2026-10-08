@@ -1,0 +1,13 @@
+{
+  "name": "bomb-squad-web",
+  "version": "1.0.0",
+  "description": "Bomb Squad-inspired web game with AI bot and online rooms",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "express": "^4.19.2",
+    "socket.io": "^4.7.5"
+  }
+}
