@@ -5,174 +5,209 @@ const { Server } = require('socket.io');
 
 const app = express();
 const server = http.createServer(app);
-const io = new Server(server, {
-  cors: { origin: '*' }
-});
+const io = new Server(server, { cors: { origin: '*' } });
 
 const PORT = process.env.PORT || 3000;
-const ROOM_CAPACITY = 4;
-const BOT_NAMES = ['Bot-1', 'Bot-2', 'Bot-3', 'Bot-4'];
-const COLORS = ['#ff7f50', '#4ecdc4', '#45aaf2', '#f7b267', '#9b59b6', '#f1c40f'];
+const MAP_WIDTH = 21;
+const MAP_HEIGHT = 13;
+const TEAM_BLUE = 'blue';
+const TEAM_RED = 'red';
 
 const rooms = new Map();
+const BOT_NAMES = { blue: ['BluBot-1', 'BluBot-2'], red: ['RedBot-1', 'RedBot-2'] };
 
-function generateMap(width = 13, height = 11) {
-  const map = Array.from({ length: height }, () => Array(width).fill(0));
-
-  for (let y = 0; y < height; y++) {
-    for (let x = 0; x < width; x++) {
-      const isBorder = x === 0 || y === 0 || x === width - 1 || y === height - 1;
-      if (isBorder) map[y][x] = 1;
-    }
+function generateMap() {
+  const map = Array(MAP_HEIGHT).fill(null).map(() => Array(MAP_WIDTH).fill(0));
+  
+  // دیوارهای دور
+  for (let y = 0; y < MAP_HEIGHT; y++) {
+    map[y][0] = 1;
+    map[y][MAP_WIDTH - 1] = 1;
   }
-
-  for (let y = 2; y < height - 2; y += 2) {
-    for (let x = 2; x < width - 2; x += 2) {
+  for (let x = 0; x < MAP_WIDTH; x++) {
+    map[0][x] = 1;
+    map[MAP_HEIGHT - 1][x] = 1;
+  }
+  
+  // دیوارهای ثابت
+  for (let y = 2; y < MAP_HEIGHT - 2; y += 2) {
+    for (let x = 2; x < MAP_WIDTH - 2; x += 2) {
       map[y][x] = 1;
     }
   }
-
-  const spawnCoords = [
-    { x: 1, y: 1 },
-    { x: width - 2, y: 1 },
-    { x: 1, y: height - 2 },
-    { x: width - 2, y: height - 2 }
-  ];
-
-  for (const spawn of spawnCoords) {
-    map[spawn.y][spawn.x] = 0;
-  }
-
-  for (let y = 1; y < height - 1; y++) {
-    for (let x = 1; x < width - 1; x++) {
-      if (map[y][x] !== 0) continue;
-      if (Math.random() < 0.42) {
-        const isSpawn = spawnCoords.some((s) => s.x === x && s.y === y);
+  
+  // بلوک‌های قابل شکستن
+  for (let y = 1; y < MAP_HEIGHT - 1; y++) {
+    for (let x = 1; x < MAP_WIDTH - 1; x++) {
+      if (map[y][x] === 0 && Math.random() < 0.35) {
+        const isSpawn = (x < 4 && y < 4) || (x > MAP_WIDTH - 5 && y < 4) ||
+                        (x < 4 && y > MAP_HEIGHT - 5) || (x > MAP_WIDTH - 5 && y > MAP_HEIGHT - 5);
         if (!isSpawn) map[y][x] = 2;
       }
     }
   }
-
+  
   return map;
 }
 
-function getSpawnPoints(width, height) {
-  return [
-    { x: 1, y: 1 },
-    { x: width - 2, y: 1 },
-    { x: 1, y: height - 2 },
-    { x: width - 2, y: height - 2 }
-  ];
+function createRoom(code) {
+  return {
+    code,
+    map: generateMap(),
+    players: [],
+    bombs: [],
+    explosions: [],
+    flags: {
+      blue: { x: 2, y: 2, carrier: null },
+      red: { x: MAP_WIDTH - 3, y: MAP_HEIGHT - 3, carrier: null }
+    },
+    scores: { blue: 0, red: 0 },
+    round: 1,
+    started: false,
+    roundEndTime: null
+  };
+}
+
+function getSpawnPoints(team) {
+  if (team === TEAM_BLUE) {
+    return [{ x: 1, y: 1 }, { x: 2, y: 3 }, { x: 3, y: 2 }];
+  } else {
+    return [
+      { x: MAP_WIDTH - 2, y: MAP_HEIGHT - 2 },
+      { x: MAP_WIDTH - 3, y: MAP_HEIGHT - 4 },
+      { x: MAP_WIDTH - 4, y: MAP_HEIGHT - 3 }
+    ];
+  }
+}
+
+function isWalkable(map, x, y) {
+  if (x < 0 || y < 0 || x >= MAP_WIDTH || y >= MAP_HEIGHT) return false;
+  return map[y][x] === 0;
 }
 
 function serializeRoom(room) {
   return {
     code: room.code,
-    maxPlayers: room.maxPlayers,
-    players: room.players.map((player) => ({
-      id: player.id,
-      name: player.name,
-      x: player.x,
-      y: player.y,
-      alive: player.alive,
-      color: player.color,
-      points: player.points,
-      bot: player.bot,
-      direction: player.direction,
-      radius: player.radius,
-      bombCooldown: player.bombCooldown
-    })),
-    bombs: room.bombs.map((bomb) => ({
-      id: bomb.id,
-      x: bomb.x,
-      y: bomb.y,
-      ownerId: bomb.ownerId,
-      explodeAt: bomb.explodeAt,
-      radius: bomb.radius
-    })),
-    explosions: room.explosions.map((explosion) => ({
-      cells: explosion.cells,
-      until: explosion.until
-    })),
     map: room.map,
-    started: room.started,
-    round: room.round,
-    winner: room.winner,
-    roundOverUntil: room.roundOverUntil,
-    currentPlayerCount: room.players.length
+    players: room.players.map(p => ({
+      id: p.id,
+      name: p.name,
+      team: p.team,
+      x: p.x,
+      y: p.y,
+      alive: p.alive,
+      hasFlag: p.hasFlag,
+      points: p.points
+    })),
+    bombs: room.bombs.map(b => ({
+      id: b.id,
+      x: b.x,
+      y: b.y,
+      radius: b.radius,
+      explodeAt: b.explodeAt
+    })),
+    explosions: room.explosions.map(e => ({
+      cells: e.cells,
+      until: e.until
+    })),
+    flags: {
+      blue: { x: room.flags.blue.x, y: room.flags.blue.y },
+      red: { x: room.flags.red.x, y: room.flags.red.y }
+    },
+    scores: room.scores,
+    round: room.round
   };
 }
 
-function isWalkable(map, x, y) {
-  if (x < 0 || y < 0 || y >= map.length || x >= map[0].length) return false;
-  return map[y][x] === 0;
-}
-
-function getCellKey(x, y) {
-  return `${x},${y}`;
-}
-
-function setPlayerDirection(player, dir) {
-  if (dir.x > 0) player.direction = 'right';
-  if (dir.x < 0) player.direction = 'left';
-  if (dir.y > 0) player.direction = 'down';
-  if (dir.y < 0) player.direction = 'up';
-}
-
-function canPlaceBomb(room, player) {
-  return player.alive && Date.now() >= player.bombCooldown;
+function updateBot(room, player) {
+  if (!player.bot || !player.alive) return;
+  
+  const directions = [{ x: 1, y: 0 }, { x: -1, y: 0 }, { x: 0, y: 1 }, { x: 0, y: -1 }];
+  const safeMoves = directions.filter(dir => isWalkable(room.map, player.x + dir.x, player.y + dir.y));
+  
+  if (safeMoves.length > 0) {
+    const move = safeMoves[Math.floor(Math.random() * safeMoves.length)];
+    player.x += move.x;
+    player.y += move.y;
+  }
+  
+  if (Math.random() < 0.15 && player.bombCooldown < Date.now()) {
+    placeBomb(room, player);
+  }
 }
 
 function placeBomb(room, player) {
-  if (!canPlaceBomb(room, player)) return;
-
-  const bomb = {
-    id: `${player.id}-${Date.now()}-${Math.random().toString(16).slice(2, 8)}`,
+  if (Date.now() < player.bombCooldown) return;
+  
+  room.bombs.push({
+    id: `${player.id}-${Date.now()}`,
     x: player.x,
     y: player.y,
     ownerId: player.id,
-    radius: player.radius,
-    explodeAt: Date.now() + 2000
-  };
-
-  room.bombs.push(bomb);
-  player.bombCooldown = Date.now() + 700;
+    radius: 3,
+    explodeAt: Date.now() + 2500
+  });
+  
+  player.bombCooldown = Date.now() + 800;
 }
 
 function explodeBomb(room, bomb) {
   const cells = [{ x: bomb.x, y: bomb.y }];
-  const directions = [
-    { x: 1, y: 0 },
-    { x: -1, y: 0 },
-    { x: 0, y: 1 },
-    { x: 0, y: -1 }
-  ];
-
+  const directions = [{ x: 1, y: 0 }, { x: -1, y: 0 }, { x: 0, y: 1 }, { x: 0, y: -1 }];
+  
   for (const dir of directions) {
     for (let i = 1; i <= bomb.radius; i++) {
       const nx = bomb.x + dir.x * i;
       const ny = bomb.y + dir.y * i;
-      if (ny < 0 || nx < 0 || ny >= room.map.length || nx >= room.map[0].length) break;
-      const tile = room.map[ny][nx];
-      if (tile === 1) break;
-
-      cells.push({ x: nx, y: ny });
-
-      if (tile === 2) {
-        room.map[ny][nx] = 0;
+      if (!isWalkable(room.map, nx, ny)) {
+        if (room.map[ny][nx] === 2) {
+          room.map[ny][nx] = 0;
+          cells.push({ x: nx, y: ny });
+        }
         break;
+      }
+      cells.push({ x: nx, y: ny });
+    }
+  }
+  
+  room.explosions.push({ cells, until: Date.now() + 300 });
+  
+  for (const player of room.players) {
+    if (!player.alive) continue;
+    if (cells.some(c => c.x === player.x && c.y === player.y)) {
+      player.alive = false;
+      if (player.hasFlag) {
+        player.hasFlag = false;
+        const flagKey = player.team === TEAM_BLUE ? 'red' : 'blue';
+        room.flags[flagKey].carrier = null;
       }
     }
   }
+}
 
-  room.explosions.push({ cells, until: Date.now() + 240 });
-
+function handleRoomTick(room) {
+  if (!room.started) return;
+  
   for (const player of room.players) {
-    if (!player.alive) continue;
-    const isHit = cells.some((cell) => cell.x === player.x && cell.y === player.y);
-    if (isHit) {
-      player.alive = false;
+    if (player.bot) updateBot(room, player);
+  }
+  
+  for (const bomb of [...room.bombs]) {
+    if (Date.now() >= bomb.explodeAt) {
+      explodeBomb(room, bomb);
+      room.bombs = room.bombs.filter(b => b.id !== bomb.id);
     }
+  }
+  
+  room.explosions = room.explosions.filter(e => Date.now() < e.until);
+  
+  const alivePlayers = room.players.filter(p => p.alive);
+  if (alivePlayers.length === 0 && !room.roundEndTime) {
+    room.roundEndTime = Date.now() + 3000;
+  }
+  
+  if (room.roundEndTime && Date.now() >= room.roundEndTime) {
+    startNewRound(room);
   }
 }
 
@@ -181,281 +216,161 @@ function startNewRound(room) {
   room.bombs = [];
   room.explosions = [];
   room.round += 1;
-  room.winner = null;
-  room.roundOverUntil = 0;
-
-  const spawnPoints = getSpawnPoints(room.map[0].length, room.map.length);
-
-  room.players.forEach((player, index) => {
-    const spawn = spawnPoints[index % spawnPoints.length] || { x: 1, y: 1 };
-    player.x = spawn.x;
-    player.y = spawn.y;
+  room.roundEndTime = null;
+  
+  const blueSpawns = getSpawnPoints(TEAM_BLUE);
+  const redSpawns = getSpawnPoints(TEAM_RED);
+  
+  let blueIdx = 0, redIdx = 0;
+  for (const player of room.players) {
     player.alive = true;
     player.bombCooldown = 0;
-    player.direction = 'down';
-  });
-}
-
-function updateBot(room, player) {
-  if (!player.bot || !player.alive) return;
-
-  const directions = [
-    { x: 1, y: 0 },
-    { x: -1, y: 0 },
-    { x: 0, y: 1 },
-    { x: 0, y: -1 }
-  ];
-
-  const danger = new Set();
-  for (const bomb of room.bombs) {
-    const blast = [{ x: bomb.x, y: bomb.y }];
-    const dirs = [
-      { x: 1, y: 0 },
-      { x: -1, y: 0 },
-      { x: 0, y: 1 },
-      { x: 0, y: -1 }
-    ];
-
-    for (const dir of dirs) {
-      for (let i = 1; i <= bomb.radius; i++) {
-        const nx = bomb.x + dir.x * i;
-        const ny = bomb.y + dir.y * i;
-        if (ny < 0 || nx < 0 || ny >= room.map.length || nx >= room.map[0].length) break;
-        blast.push({ x: nx, y: ny });
-        if (room.map[ny][nx] === 1) break;
-      }
-    }
-
-    blast.forEach((cell) => danger.add(getCellKey(cell.x, cell.y)));
-  }
-
-  let bestOption = null;
-  let bestScore = -Infinity;
-
-  for (const dir of directions) {
-    const nx = player.x + dir.x;
-    const ny = player.y + dir.y;
-    if (!isWalkable(room.map, nx, ny)) continue;
-
-    if (danger.has(getCellKey(nx, ny))) {
-      continue;
-    }
-
-    const targetPlayers = room.players.filter((p) => p.id !== player.id && p.alive);
-    let score = 0;
-    const nearEnemy = targetPlayers
-      .map((p) => ({ p, dist: Math.abs(p.x - nx) + Math.abs(p.y - ny) }))
-      .sort((a, b) => a.dist - b.dist)[0];
-
-    if (nearEnemy) {
-      score += 80 - nearEnemy.dist * 4;
-    }
-
-    const breakable = [];
-    for (let y = -2; y <= 2; y++) {
-      for (let x = -2; x <= 2; x++) {
-        const bx = nx + x;
-        const by = ny + y;
-        if (by < 0 || bx < 0 || by >= room.map.length || bx >= room.map[0].length) continue;
-        if (room.map[by][bx] === 2) breakable.push({ x: bx, y: by });
-      }
-    }
-
-    if (breakable.length > 0) {
-      score += 35;
-    }
-
-    if (Math.random() < 0.12 && canPlaceBomb(room, player)) {
-      score += 10;
-    }
-
-    if (score > bestScore) {
-      bestScore = score;
-      bestOption = dir;
-    }
-  }
-
-  if (bestOption) {
-    player.x += bestOption.x;
-    player.y += bestOption.y;
-    setPlayerDirection(player, bestOption);
-  }
-
-  if (Math.random() < 0.28 && canPlaceBomb(room, player)) {
-    const enemyNearby = room.players.some((p) => p.id !== player.id && p.alive && Math.abs(p.x - player.x) + Math.abs(p.y - player.y) <= 4);
-    if (enemyNearby) {
-      placeBomb(room, player);
-    }
-  }
-}
-
-function handleRoomTick(room) {
-  if (!room.started) return;
-
-  for (const player of room.players) {
-    if (player.bot) {
-      updateBot(room, player);
-    }
-  }
-
-  for (const bomb of [...room.bombs]) {
-    if (Date.now() >= bomb.explodeAt) {
-      explodeBomb(room, bomb);
-      room.bombs = room.bombs.filter((entry) => entry.id !== bomb.id);
-    }
-  }
-
-  for (const explosion of [...room.explosions]) {
-    if (Date.now() >= explosion.until) {
-      room.explosions = room.explosions.filter((entry) => entry.until !== explosion.until);
-    }
-  }
-
-  const alive = room.players.filter((player) => player.alive);
-  if (alive.length <= 1 && !room.roundOverUntil) {
-    const winner = alive[0];
-    if (winner) {
-      winner.points += 1;
-      room.winner = winner.name;
+    player.hasFlag = false;
+    
+    if (player.team === TEAM_BLUE) {
+      const spawn = blueSpawns[blueIdx % blueSpawns.length];
+      player.x = spawn.x;
+      player.y = spawn.y;
+      blueIdx++;
     } else {
-      room.winner = 'Draw';
+      const spawn = redSpawns[redIdx % redSpawns.length];
+      player.x = spawn.x;
+      player.y = spawn.y;
+      redIdx++;
     }
-    room.roundOverUntil = Date.now() + 2600;
   }
-
-  if (room.roundOverUntil && Date.now() >= room.roundOverUntil) {
-    startNewRound(room);
-  }
-}
-
-function ensureBotsForRoom(room) {
-  if (room.players.length >= room.maxPlayers) return;
-
-  while (room.players.length < room.maxPlayers) {
-    const botIndex = room.players.length;
-    const spawn = getSpawnPoints(room.map[0].length, room.map.length)[botIndex % 4];
-
-    room.players.push({
-      id: `bot-${Date.now()}-${Math.random().toString(16).slice(2, 8)}`,
-      name: BOT_NAMES[botIndex] || `Bot-${botIndex + 1}`,
-      x: spawn.x,
-      y: spawn.y,
-      color: COLORS[botIndex % COLORS.length],
-      radius: 2,
-      alive: true,
-      points: 0,
-      bot: true,
-      direction: 'down',
-      bombCooldown: 0
-    });
-  }
-}
-
-function createRoom(code, maxPlayers) {
-  const room = {
-    code,
-    maxPlayers: Math.min(Math.max(parseInt(maxPlayers, 10) || 2, 2), ROOM_CAPACITY),
-    players: [],
-    bombs: [],
-    explosions: [],
-    map: generateMap(),
-    started: false,
-    winner: null,
-    round: 1,
-    roundOverUntil: 0
-  };
-
-  rooms.set(code, room);
-  return room;
+  
+  room.flags.blue.carrier = null;
+  room.flags.red.carrier = null;
 }
 
 app.use(express.static(path.join(__dirname, 'public')));
-
-app.get('/health', (_, res) => {
-  res.json({ ok: true, rooms: rooms.size });
-});
+app.get('/health', (_, res) => res.json({ ok: true }));
 
 io.on('connection', (socket) => {
-  socket.on('joinRoom', ({ roomCode, name, playerCount }) => {
-    const code = String(roomCode || 'BOMB').trim().toUpperCase();
-    const playerName = String(name || 'Player').trim().slice(0, 14) || 'Player';
-    const room = rooms.get(code) || createRoom(code, playerCount || 2);
-
-    if (room.players.length >= room.maxPlayers) {
-      socket.emit('roomFull', { code: room.code });
-      return;
+  socket.on('joinRoom', ({ code, name, team }) => {
+    const roomCode = (code || 'BOMB').toUpperCase();
+    let room = rooms.get(roomCode);
+    if (!room) {
+      room = createRoom(roomCode);
+      rooms.set(roomCode, room);
     }
-
-    const spawnPoints = getSpawnPoints(room.map[0].length, room.map.length);
-    const spawn = spawnPoints[room.players.length % spawnPoints.length];
-
+    
+    const playerTeam = team === TEAM_RED ? TEAM_RED : TEAM_BLUE;
+    const spawns = getSpawnPoints(playerTeam);
+    const spawn = spawns[Math.floor(Math.random() * spawns.length)];
+    
     const player = {
       id: socket.id,
-      name: playerName,
+      name: name || 'Player',
+      team: playerTeam,
       x: spawn.x,
       y: spawn.y,
-      color: COLORS[room.players.length % COLORS.length],
-      radius: 2,
       alive: true,
+      hasFlag: false,
       points: 0,
       bot: false,
-      direction: 'down',
       bombCooldown: 0
     };
-
+    
     room.players.push(player);
-    socket.join(code);
+    socket.join(roomCode);
     room.started = true;
-    ensureBotsForRoom(room);
-
-    socket.emit('joined', {
-      roomCode: room.code,
-      playerCount: room.maxPlayers
-    });
-
-    io.to(code).emit('state', serializeRoom(room));
+    
+    // ا��افه کردن بات‌ها
+    while (room.players.filter(p => p.team === TEAM_BLUE && p.bot).length < 1) {
+      const botSpawns = getSpawnPoints(TEAM_BLUE);
+      room.players.push({
+        id: `bot-${Date.now()}-${Math.random()}`,
+        name: BOT_NAMES.blue[room.players.filter(p => p.team === TEAM_BLUE && p.bot).length],
+        team: TEAM_BLUE,
+        x: botSpawns[0].x,
+        y: botSpawns[0].y,
+        alive: true,
+        hasFlag: false,
+        points: 0,
+        bot: true,
+        bombCooldown: 0
+      });
+    }
+    
+    while (room.players.filter(p => p.team === TEAM_RED && p.bot).length < 1) {
+      const botSpawns = getSpawnPoints(TEAM_RED);
+      room.players.push({
+        id: `bot-${Date.now()}-${Math.random()}`,
+        name: BOT_NAMES.red[room.players.filter(p => p.team === TEAM_RED && p.bot).length],
+        team: TEAM_RED,
+        x: botSpawns[0].x,
+        y: botSpawns[0].y,
+        alive: true,
+        hasFlag: false,
+        points: 0,
+        bot: true,
+        bombCooldown: 0
+      });
+    }
+    
+    socket.emit('joined', { roomCode, team: playerTeam });
+    io.to(roomCode).emit('state', serializeRoom(room));
   });
-
-  socket.on('move', ({ roomCode, dir }) => {
-    const room = rooms.get(String(roomCode || '').trim().toUpperCase());
+  
+  socket.on('move', ({ roomCode, dx, dy }) => {
+    const room = rooms.get(roomCode?.toUpperCase());
     if (!room) return;
-
-    const player = room.players.find((entry) => entry.id === socket.id);
+    const player = room.players.find(p => p.id === socket.id);
     if (!player || !player.alive) return;
-
-    if (!dir || typeof dir.x !== 'number' || typeof dir.y !== 'number') return;
-
-    const nextX = player.x + dir.x;
-    const nextY = player.y + dir.y;
-    if (isWalkable(room.map, nextX, nextY)) {
-      player.x = nextX;
-      player.y = nextY;
-      setPlayerDirection(player, dir);
+    
+    const nx = player.x + dx;
+    const ny = player.y + dy;
+    if (isWalkable(room.map, nx, ny)) {
+      player.x = nx;
+      player.y = ny;
+      
+      // پرچم را برداشت
+      const flagKey = player.team === TEAM_BLUE ? 'red' : 'blue';
+      if (room.flags[flagKey].x === nx && room.flags[flagKey].y === ny && !room.flags[flagKey].carrier) {
+        player.hasFlag = true;
+        room.flags[flagKey].carrier = player.id;
+      }
     }
   });
-
-  socket.on('placeBomb', ({ roomCode }) => {
-    const room = rooms.get(String(roomCode || '').trim().toUpperCase());
+  
+  socket.on('bomb', ({ roomCode }) => {
+    const room = rooms.get(roomCode?.toUpperCase());
     if (!room) return;
-
-    const player = room.players.find((entry) => entry.id === socket.id);
-    if (player) {
-      placeBomb(room, player);
-      io.to(room.code).emit('state', serializeRoom(room));
+    const player = room.players.find(p => p.id === socket.id);
+    if (player) placeBomb(room, player);
+  });
+  
+  socket.on('flagCapture', ({ roomCode }) => {
+    const room = rooms.get(roomCode?.toUpperCase());
+    if (!room) return;
+    const player = room.players.find(p => p.id === socket.id);
+    if (!player || !player.hasFlag) return;
+    
+    const homeFlag = player.team === TEAM_BLUE ? 'blue' : 'red';
+    if (player.x >= 1 && player.x <= 3 && player.y >= 1 && player.y <= 3 && player.team === TEAM_BLUE) {
+      room.scores[TEAM_BLUE]++;
+      player.points += 10;
+      player.hasFlag = false;
+      room.flags.red.carrier = null;
+      io.to(roomCode).emit('captured', { team: TEAM_BLUE });
+    } else if (player.x >= MAP_WIDTH - 4 && player.x <= MAP_WIDTH - 2 && player.y >= MAP_HEIGHT - 4 && player.y <= MAP_HEIGHT - 2 && player.team === TEAM_RED) {
+      room.scores[TEAM_RED]++;
+      player.points += 10;
+      player.hasFlag = false;
+      room.flags.blue.carrier = null;
+      io.to(roomCode).emit('captured', { team: TEAM_RED });
     }
   });
-
+  
   socket.on('disconnect', () => {
     for (const room of rooms.values()) {
-      const index = room.players.findIndex((player) => player.id === socket.id);
-      if (index >= 0) {
-        room.players.splice(index, 1);
+      const idx = room.players.findIndex(p => p.id === socket.id);
+      if (idx >= 0) {
+        room.players.splice(idx, 1);
         if (room.players.length === 0) {
           rooms.delete(room.code);
-        } else {
-          room.started = true;
-          ensureBotsForRoom(room);
-          io.to(room.code).emit('state', serializeRoom(room));
         }
       }
     }
@@ -467,8 +382,8 @@ setInterval(() => {
     handleRoomTick(room);
     io.to(room.code).emit('state', serializeRoom(room));
   }
-}, 110);
+}, 100);
 
 server.listen(PORT, () => {
-  console.log(`Bomb squad server listening on http://localhost:${PORT}`);
+  console.log(`🎮 Bomb Squad 3D server on http://localhost:${PORT}`);
 });
